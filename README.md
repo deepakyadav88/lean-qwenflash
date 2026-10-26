@@ -114,10 +114,11 @@ python3 -m venv .venv
 source .venv/bin/activate        # later steps write plain `python`; use .venv/bin/python if you skip this
 ```
 
-**2. Checkpoint to NVMe (~85 GB, resumable, sha256-checked against the HF LFS oid).**
+**2. Checkpoint to NVMe (~85 GB for 3.05bpw, resumable, sha256-checked against the HF LFS oid).**
 ```bash
-scripts/download_model.sh --dest /media/deepak/E/qwen/model --branch 3.05bpw_h5_ng5
-# re-run the same command after an interrupted download; look for: VERIFY_DONE: 7 files, bad: []
+scripts/download_model.sh /media/deepak/E/qwen                     # download + pack + verify (branch 3.05bpw_h5_ng5)
+scripts/download_model.sh /media/deepak/E/qwen --download-only     # just the checkpoint
+# re-run the same command after an interrupted download; look for: VERIFY_DONE ... bad: []
 ```
 
 **3. Expert store to NVMe (25,088 records, 46.76 GB, O_DIRECT).**
@@ -209,6 +210,60 @@ python qwen38-flash-offload/bench/stream_rate.py --url http://127.0.0.1:30000
 ```
 
 Full lever table and measurement rules: [docs/benchmarking.md](docs/benchmarking.md).
+
+## Running a different quant
+
+The pipeline reads the checkpoint itself: record size, slot size, expert count and the resident weight budget come
+from the safetensors headers, so `pack`, `verify`, `cmp`, `hw_preflight` and the tier engine work for any branch of
+`turboderp/Qwen3.8-Flash-Next-exl3`. **One thing does not:** the hand-written AVX2 lane kernels
+(`kernels/cpu_avx2/ft_core.h`, `kernels/nv2/ft_n135.h`) decode a **3-bit MUL1 trellis** (`BITS = 3`). A quant whose
+expert trellis is not 3-bit runs GPU-only, and `hw_preflight` says so in a WARN.
+
+| branch | expert trellis | CPU lane | checkpoint | store | VRAM slots | 20 GiB tier | experts resident |
+|---|---|---|---|---|---|---|---|
+| `3.05bpw_h5_ng5` | 3-bit | works | 85.2 GB | 43.5 GiB | 2,835 | 11,650 | 58% |
+| `3.18bpw_h6_ng8` | 3-bit | works | 106.5 GB | ~50.7 GiB | ~2,280 | ~9,986 | ~49% |
+| `2.68bpw_h6_ng8` | 3-bit | works | 98.4 GB | 43.5 GiB | 2,835 | 11,650 | 58% |
+| `2.05bpw_h4_ng4` | 2-bit | **off** | 62.8 GB | 29.2 GiB | 4,403 | 17,476 | **87%** |
+| `1.66bpw_h4_ng3` | 2-bit | **off** | 50.2 GB | 29.2 GiB | ~4,670 | ~17,476 | ~88% |
+
+Checkpoint totals include the n-gram embedding table, which is the part that grows with the branch's `ng` setting
+(51.8 GB on `ng8`, 32.6 GB on `ng5`, 26.2 GB on `ng4`, 19.8 GB on `ng3`). Slot and tier counts are approximations;
+`scripts/hw_preflight.py` computes the real ones from the checkpoint headers and the memory actually available.
+
+Measured geometry for `2.05bpw_h4_ng4` on this machine (strata stopped, desktop 0.7 GiB, tier 20 GiB, 32k context):
+record 1,248,256 B, slot 1,228,800 B, VRAM budget 10.75 GiB, resident weights 4.09 GiB, KV 0.19 GiB, cache arena
+5.04 GiB = 4,403 slots, tier 17,476 slots, **21,879 of 25,088 experts resident (87%)**, lane off, POL
+`0.17,0.003,0.049,0.145,0.122,0.03,0.052,0.12,0.5,0.62`.
+
+```bash
+# 1. make room: /media/deepak/E has 11 GiB free; a 2.05 checkpoint + store needs ~94 GB
+rm -rf /media/deepak/E/qwen/model          # 80 GB; keep the store if you want to keep serving 3.05
+
+# 2. download + pack + verify the branch
+scripts/download_model.sh /media/deepak/E/qwen-205 --branch=2.05bpw_h4_ng4
+# store lands at /media/deepak/E/qwen-205/store/qwen38_flash_exl3_2.05bpw_experts.bin
+
+# 3. derive budgets for this quant (writes hw.env; expect the "2-bit trellis" WARN and lane OFF)
+scripts/hw_preflight.py --model=/media/deepak/E/qwen-205/model \
+  --store=/media/deepak/E/qwen-205/store/qwen38_flash_exl3_2.05bpw_experts.bin \
+  --store-dir=/media/deepak/E/qwen-205/store --write=/media/deepak/E/qwen-205/hw.env --measure
+
+# 4. serve (run_local.sh reads MODEL/STORE from the environment)
+MODEL=/media/deepak/E/qwen-205/model \
+STORE=/media/deepak/E/qwen-205/store/qwen38_flash_exl3_2.05bpw_experts.bin \
+scripts/run_local.sh --scope
+
+# 5. benchmark the same way
+scripts/bench_local.sh --contexts "32768 65536" --config-label "2.05bpw lane-off"
+```
+
+What changes in practice: fewer NVMe reads and less PCIe traffic per miss (1.17 MiB slots instead of 1.76 MiB, 87%
+resident instead of 58%), but the CPU lane is gone, so cold picks go over PCIe instead of being computed on six cores.
+On this box the lane bought ~85% of decode speed on the measured host and the NVMe is the bottleneck here, so 2.05
+should be the faster configuration; it is also a much more aggressive quant, and the repo's reference panel
+(`reference/qwen3.8-flash-next-exl3-ref-panel.json`) was scored against 3.05, so re-check quality with
+`bench/decode_kl_nv.py` and your own prompts before you trust it.
 
 ---
 

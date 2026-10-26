@@ -10,7 +10,7 @@ join=os.environ.get('QWEN_DOWNLOAD_JOIN_CGROUP','auto')
 if join=='1' or (join=='auto' and (cg/'cgroup.procs').exists()):
  (cg/'cgroup.procs').write_text(str(os.getpid()))
 workers=int(os.environ.get('QWEN_DOWNLOAD_WORKERS','32'))
-repo='turboderp/Qwen3.8-Flash-Next-exl3'; branch='3.05bpw_h5_ng5'
+repo='turboderp/Qwen3.8-Flash-Next-exl3'; branch=os.environ.get('QWEN_MODEL_BRANCH','3.05bpw_h5_ng5')
 info=HfApi().model_info(repo,revision=branch,files_metadata=True)
 assert info.sha=='69e33439ae950f17bcbe95c98f117d80f759ab6d'
 # Range parts are preallocated with posix_fallocate, so a resumed run needs no new space for bytes it will rewrite.

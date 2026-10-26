@@ -148,6 +148,7 @@ def checkpoint_geometry(model_dir):
     idx = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
     shards = sorted(set(idx.values()))
     sizes = {}
+    gate_shape = down_shape = None
     for fn in shards:
         p = model_dir / fn
         if not p.exists():                      # a resumed download leaves .http-part files behind
@@ -158,6 +159,10 @@ def checkpoint_geometry(model_dir):
         h.pop("__metadata__", None)
         for k, v in h.items():
             sizes[k] = v["data_offsets"][1] - v["data_offsets"][0]
+            if gate_shape is None and k.endswith(".gate_proj.trellis"):
+                gate_shape = v["shape"]
+            if down_shape is None and k.endswith(".down_proj.trellis"):
+                down_shape = v["shape"]
     trellis = sum(v for k, v in sizes.items() if ".mlp.experts." in k and k.endswith(".trellis"))
     side = sum(v for k, v in sizes.items() if ".mlp.experts." in k and
                (k.endswith(".suh") or k.endswith(".svh") or k.endswith(".mul1")))
@@ -181,10 +186,25 @@ def checkpoint_geometry(model_dir):
     for f in model_dir.iterdir():
         if f.is_file() and (f.name.endswith(".safetensors") or f.name.endswith(".safetensors.http-part")):
             disk += f.stat().st_size
+    cfg = {}
+    try:
+        cfg = json.loads((model_dir / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+    qc = cfg.get("quantization_config") or {}
+    # The hand-written lane kernels (kernels/cpu_avx2/ft_core.h, kernels/nv2/ft_n135.h) decode a 3-bit MUL1 trellis.
+    # The trellis shape says the expert bit width directly: the last dim is the tile in fp16 units,
+    # 16 * bits (kernels/cpu_avx2/ft_core.h TILE_BYTES = 16 * BITS * 2). 3.05bpw -> 48 -> 3 bits.
+    bits_from_shape = gate_shape[-1] // 16 if gate_shape else 0
+    if bits_from_shape not in (1, 2, 3, 4, 5, 6, 8):
+        bits_from_shape = int(round(qc.get("bits", 3.05))) if qc else 3
+    expert_bits = bits_from_shape
     return {"total_bytes": sum(sizes.values()), "disk_bytes": disk, "trellis_bytes": trellis, "side_bytes": side,
             "vision_bytes": vision, "mtp_bytes": mtp, "dense_bytes": other,
             "experts": n_exp, "experts_trunk": experts_trunk, "experts_per_layer": experts_per_layer,
-            "layers": layers, "mtp_layers": len(mtp_l), "slot_bytes": slot, "record_bytes": record}
+            "layers": layers, "mtp_layers": len(mtp_l), "slot_bytes": slot, "record_bytes": record,
+            "quant_bits": qc.get("bits"), "head_bits": qc.get("head_bits"), "codebook": qc.get("codebook"),
+            "expert_bits": expert_bits, "gate_trellis_shape": gate_shape}
 
 
 def kv_bytes_per_token(model_dir, cache_quant=4):
@@ -258,7 +278,9 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
     # --- CPU pinning: physical cores for the lane, SMT siblings for the readers
     cores = [cpus["cores"][k] for k in sorted(cpus["cores"])]
     affinity = cpus["affinity"]
-    lane_threads = len(cores) - 2 if cpus["lane_ok"] and len(cores) > 3 else (1 if cpus["lane_ok"] else 0)
+    # The lane kernels are hardcoded to a 3-bit MUL1 trellis, so a 2-bit or 4-bit quant cannot use them.
+    lane_supported = cpus["lane_ok"] and geo["expert_bits"] == 3
+    lane_threads = len(cores) - 2 if lane_supported and len(cores) > 3 else (1 if lane_supported else 0)
     lane_cpus = [cores[i][0] for i in range(2, min(len(cores), 2 + lane_threads))] or affinity[:lane_threads]
     lane_threads = len(lane_cpus)
     spare = [c for c in affinity if c not in lane_cpus and c not in (0, 1)]
@@ -292,15 +314,15 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
         "QWEN38_NV_VRING": "16",
         "QWEN38_NV_PREFETCH": "1",
         "QWEN38_NV_EXCL": "1",
-        "QWEN38_NV_CPU": "1" if cpus["lane_ok"] else "0",
+        "QWEN38_NV_CPU": "1" if lane_supported else "0",
         "QWEN38_NV_NOADMIT": "1",
         # HOM-272 / N136 decode levers, measured on the same code path (the CPU kernel needs the CPU lane).
         # Each is a scheduling change; CPU_KERN is not bit-exact (~3e-4 relative per expert).
-        "QWEN38_LA": "1" if cpus["lane_ok"] else "0",
-        "QWEN38_LA_BTTRIM": "1" if cpus["lane_ok"] else "0",
+        "QWEN38_LA": "1" if lane_supported else "0",
+        "QWEN38_LA_BTTRIM": "1" if lane_supported else "0",
         "QWEN38_NV_PUBFAST": "1",
         "QWEN38_NV_PFSIDE": "1",
-        "QWEN38_NV_CPU_KERN": "1" if cpus["lane_ok"] else "0",
+        "QWEN38_NV_CPU_KERN": "1" if lane_supported else "0",
         "QWEN38_NV_POL": ",".join(str(p[k]) for k in
                                   ["g0", "thit", "tzc", "ca", "cb", "ctok", "push", "nvlat", "nvdeep", "nvone"]),
         "QWEN38_EC_RESERVE_GB": f"{reserve / GiB:.1f}",
@@ -327,6 +349,11 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
             f"{rcs / GiB:.1f} GiB recurrent cache and {host_reserve / GiB:.1f} GiB of OS headroom. Free memory or pass --ram-gb.")
     if not cpus["lane_ok"]:
         warnings.append("CPU lacks AVX2+FMA+F16C: the CPU lane is off (QWEN38_NV_CPU=0), decode falls back to the GPU-only exact path.")
+    elif geo["expert_bits"] != 3:
+        warnings.append(
+            f"expert weights are {geo['quant_bits']} bpw ({geo['expert_bits']}-bit trellis, codebook "
+            f"{geo['codebook']}): the AVX2 lane kernels are hardcoded 3-bit (kernels/cpu_avx2/ft_core.h BITS=3), so "
+            f"QWEN38_NV_CPU / NV_CPU_KERN / LA are off and decode runs GPU-only over PCIe.")
 
     return {
         "warnings": warnings,
@@ -339,6 +366,7 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
         "cpu": {"ncores": cpus["ncores"], "logical": cpus["affinity"], "lane_ok": cpus["lane_ok"],
                 "tune": cpus["tune"], "dram_gbps": cpu_bw, "lane_cpus": lane_cpus, "reader_cpus": reader_cpus},
         "model": {"checkpoint_bytes": geo["total_bytes"], "experts": geo["experts"], "layers": geo["layers"],
+                  "quant_bits": geo["quant_bits"], "head_bits": geo["head_bits"], "expert_bits": geo["expert_bits"],
                   "slot_bytes": geo["slot_bytes"], "record_bytes": geo["record_bytes"],
                   "store_bytes": geo["record_bytes"] * geo["experts"],
                   "resident_weights_bytes": weights, "kv_per_token": ctx["kv_per_token"],
@@ -388,9 +416,12 @@ def main():
     print(f"RAM    {h['ram_available'] / GiB:.1f} GiB available -> expert tier {h['tier_gb']:.1f} GiB "
           f"({int(h['tier_gb'] * GiB // m['slot_bytes'])} slots), rcs {h['rcs_gb']:.2f}, ring {h['pf_ring_gb']:.2f}, "
           f"margin {h['margin_gb']:.1f}, OS reserve {h['host_reserve_gb']:.1f}")
+    print(f"Quant  {m['quant_bits']} bpw experts ({m['expert_bits']}-bit trellis), head_bits {m['head_bits']}, "
+          f"slot {m['slot_bytes'] / MB:.2f} MiB, record {m['record_bytes'] / MB:.2f} MiB")
     print(f"Tier   {m['resident_experts']} of {m['experts']} experts resident ({m['resident_fraction']:.0%}); "
           f"store {m['store_bytes'] / GiB:.1f} GiB on NVMe")
-    print(f"CPU    {c['ncores']} physical cores, AVX2 lane {'on' if c['lane_ok'] else 'OFF'}, tune {c['tune']}, "
+    print(f"CPU    {c['ncores']} physical cores, AVX2 lane "
+          f"{'on' if prof['env']['QWEN38_NV_CPU'] == '1' else 'OFF'}, tune {c['tune']}, "
           f"lane cpus {c['lane_cpus']}, reader cpus {c['reader_cpus']}")
     print(f"POL    {prof['env']['QWEN38_NV_POL']}")
     if "--write" in args:
