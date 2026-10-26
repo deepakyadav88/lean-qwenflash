@@ -34,9 +34,13 @@ if [ ! -f "$ROOT/hw.env" ]; then
 fi
 source "$ROOT/hw.env"
 
-# The RAM tier is cudaHostRegister-ed; without unlimited memlock the pinned arena can fail.
+# The RAM tier is cudaHostRegister-ed, which is charged against RLIMIT_MEMLOCK. A plain shell cannot
+# raise it past the hard limit, and systemd-run --scope cannot set LimitMEMLOCK (rlimits apply to
+# service units only), so the pinned arena fails at a capped memlock.
 if ! ulimit -l unlimited 2>/dev/null; then
-  echo "[lean] WARNING: cannot raise memlock (currently $(ulimit -l) KiB); run from a shell with ulimit -l unlimited." >&2
+  echo "[lean] WARNING: memlock $(ulimit -l) KiB < pinned expert tier ${QWEN38_NV_RAM_GB} GiB; cudaHostRegister will fail." >&2
+  echo "[lean]          Run as root: sudo bash -c 'ulimit -l unlimited; exec \"$ROOT/scripts/run_local.sh\"'   (same args)" >&2
+  echo "[lean]          Or persistently: DefaultLimitMEMLOCK=infinity in /etc/systemd/system.conf, then reboot." >&2
 fi
 USED=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
 if [ "${USED:-0}" -gt 1500 ]; then
