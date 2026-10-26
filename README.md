@@ -91,6 +91,127 @@ scripts/run_local.sh
 
 ---
 
+## Step-by-step on this machine (RTX 3060 12 GB, Ryzen 5 3600, one NVMe)
+
+Every budget below is derived from the host by `hw_preflight.py` and written to `hw.env`, which `run_local.sh` and
+`bench_local.sh` source. Commands assume the repo root and the NVMe mount `/media/deepak/E`. The checkpoint and the
+store on this machine are downloaded and verified; **the serving and benchmark steps have not been run here yet**, so
+the throughput figures are derived from bandwidth, not measured.
+
+**0. Free the GPU and the RAM.** The engine needs ~11 GiB of VRAM and ~24 GiB of RAM, so nothing else can hold them.
+```bash
+pgrep -af strata                       # e.g. strata-host: ~10.6 GiB VRAM, ~27 GiB RAM
+nvidia-smi --query-gpu=memory.used --format=csv,noheader   # must read ~700 MiB (desktop only)
+ulimit -l unlimited                    # memlock is 4 GiB here; the RAM tier is cudaHostRegister-ed
+```
+
+**1. Environment.**
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -U pip
+.venv/bin/pip install numpy safetensors huggingface_hub requests jinja2 fastapi uvicorn psutil
+.venv/bin/pip install torch==2.11.0 triton==3.6.0 ninja
+source .venv/bin/activate        # later steps write plain `python`; use .venv/bin/python if you skip this
+```
+
+**2. Checkpoint to NVMe (~85 GB, resumable, sha256-checked against the HF LFS oid).**
+```bash
+scripts/download_model.sh --dest /media/deepak/E/qwen/model --branch 3.05bpw_h5_ng5
+# re-run the same command after an interrupted download; look for: VERIFY_DONE: 7 files, bad: []
+```
+
+**3. Expert store to NVMe (25,088 records, 46.76 GB, O_DIRECT).**
+```bash
+.venv/bin/python qwen38-flash-offload/scripts/pack_qwen38_store.py pack \
+  --model /media/deepak/E/qwen/model --out-dir /media/deepak/E/qwen/store --threads 6
+.venv/bin/python qwen38-flash-offload/scripts/pack_qwen38_store.py verify \
+  --model /media/deepak/E/qwen/model --out-dir /media/deepak/E/qwen/store   # VERIFY OK
+.venv/bin/python qwen38-flash-offload/scripts/pack_qwen38_store.py cmp --sample 300 \
+  --model /media/deepak/E/qwen/model --out-dir /media/deepak/E/qwen/store   # CMP OK
+```
+
+**4. Build the extensions for this silicon (sm_86 + Zen2).**
+```bash
+TORCH_CUDA_ARCH_LIST=8.6 QWEN38_CPUTUNE=znver2 scripts/build_extensions.sh
+```
+
+**5. Derive the budgets (writes `hw.env`).**
+```bash
+scripts/hw_preflight.py --model=/media/deepak/E/qwen/model \
+  --store=/media/deepak/E/qwen/store/qwen38_flash_exl3_3.05bpw_experts.bin \
+  --store-dir=/media/deepak/E/qwen/store --measure
+# PASS: VRAM budget 10.70 GiB -> 2835 slots; RAM tier 20 GiB -> 11650 slots; residency 58%; lane cpus 2-5
+```
+
+**6. Serve with the best params for this host.**
+```bash
+scripts/run_local.sh --scope            # preferred: systemd cap with MemorySwapMax=0, budget from MemAvailable
+```
+
+The same thing spelled out, if you want to run the server directly:
+
+```bash
+MODEL=/media/deepak/E/qwen/model
+STORE=/media/deepak/E/qwen/store/qwen38_flash_exl3_3.05bpw_experts.bin
+export QWEN_VRAM_LIMIT_BYTES=11492737024 QWEN_RAM_LIMIT_BYTES=25769803776 QWEN38_NV_RAM_GB=20
+export QWEN38_NV_THREADS=12 QWEN38_NV_PIECE_KB=256 QWEN38_NV_PREFETCH=1 QWEN38_NV_PF_RING=256 QWEN38_NV_PF_QD=16
+export QWEN38_NV_VRING=16 QWEN38_NV_EXCL=1 QWEN38_NV_MAXCPU=8 QWEN38_NV_NOADMIT=1
+export QWEN38_NV_CPU=1 QWEN38_NV_CPU_THREADS=4 QWEN38_NV_CPU_CPUS=2-5 QWEN38_NV_READER_CPUS=6-11
+export QWEN38_MAIN_CPUS=0 QWEN38_NV_CTL_CPU=1 QWEN38_RCS_GB=0.25
+export QWEN38_NV_POL=0.17,0.004,0.074,0.145,0.183,0.044,0.078,0.12,0.745,0.865
+export QWEN38_LA=1 QWEN38_LA_BTTRIM=1 QWEN38_NV_PUBFAST=1 QWEN38_NV_PFSIDE=1 QWEN38_NV_CPU_KERN=1
+export TORCH_CUDA_ARCH_LIST=8.6 QWEN38_CPUTUNE=znver2 MAX_JOBS=4
+python qwen_server.py --model "$MODEL" --store "$STORE" \
+  --cache 32768 --cache-quant 4 --chunk 4096 --port 30000
+```
+
+Expect `QWEN_SERVER_LOADED ... ready in 60-120 s`, decode ~5-10 tok/s at concurrency 1, prefill ~150-400 tok/s.
+
+**7. One-shot sanity check.**
+```bash
+python infer.py --model "$MODEL" --store "$STORE" --cache 32768 --cache-quant 4 --chunk 4096 \
+  --max-tokens 256 --prompt "Write an implementation of merge sort in C."
+```
+
+**8. Benchmark.** Context is a restart knob, so sweep it with the harness (it restarts the server per KV size):
+```bash
+scripts/bench_local.sh                                        # 16k 32k 65k 131k
+scripts/bench_local.sh --contexts "32768 65536 262144"       # pay for context
+scripts/bench_local.sh --conc "1 2 4" --reps 3 --config-label "ram20 prefetch-on"
+# results: bench_out/sweep_<ctx>.json, memory_<ctx>.json, stats_<ctx>.json, server_<ctx>.log
+```
+
+While a server is up, read the engine directly:
+```bash
+curl -s localhost:30000/stats | python -m json.tool        # hit rates, tier mix, reads/sec, write-backs
+curl -s localhost:30000/memory | python -m json.tool       # ram/vram current + peak vs limit
+curl -s localhost:30000/nv_trace | python -m json.tool     # NVMe batch latency p50/p99
+curl -s localhost:30000/server_info | python -m json.tool  # context, chunk, KV dtype, every QWEN38_* value
+```
+
+**9. Tune one lever at a time, in the same session** (arms measured hours apart drift):
+```bash
+curl -s "localhost:30000/la?on=0"    # decode lookahead off   # back on: /la?on=1
+QWEN38_NV_RAM_GB=12 scripts/run_local.sh          # smaller host tier
+QWEN38_EC_MAX_SLOTS=2000 scripts/run_local.sh     # cap VRAM slots, leave headroom for the desktop
+QWEN38_NV_PIECE_KB=128 scripts/run_local.sh       # read piece size (record is 1.86 MB)
+QWEN38_NV_THREADS=8 scripts/run_local.sh          # reader pool on one NVMe
+QWEN38_NV_CPU=0 scripts/run_local.sh              # AVX2 lane off (bit-exact decode)
+QWEN38_NV_CPU_THREADS=6 QWEN38_NV_CPU_CPUS=2-7 scripts/run_local.sh
+python benchmark.py --model "$MODEL" --store "$STORE" --cache 32768 --ram-gb 20 \
+  --prefill 8192 32768 --prefetch-compare --cpu-compare --out bench_out/levers.json
+```
+
+**10. Check quality after any lane change** (prefill is bit-exact; decode with the CPU lane is not):
+```bash
+python qwen38-flash-offload/bench/decode_kl_nv.py            # top-1 agreement, mean KL (reference: 0.986 / 0.0047)
+python qwen38-flash-offload/bench/stream_rate.py --url http://127.0.0.1:30000
+```
+
+Full lever table and measurement rules: [docs/benchmarking.md](docs/benchmarking.md).
+
+---
+
 ## Serving
 
 Start the OpenAI-compatible server on port `30000`:
