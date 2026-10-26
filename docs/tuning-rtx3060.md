@@ -87,6 +87,24 @@ scripts/hw_preflight.py --model=/media/deepak/E/qwen/model \
 scripts/run_local.sh                                    # OpenAI-compatible server on :30000
 ```
 
+## On this machine right now
+
+Downloaded and verified (2026-10-26):
+
+* checkpoint `3.05bpw_h5_ng5` — `/media/deepak/E/qwen/model`, 85 GB, every file sha256-checked against the HF LFS oid
+* expert store — `/media/deepak/E/qwen/store/qwen38_flash_exl3_3.05bpw_experts.bin`, 25,088 records, 46.76 GB;
+  `verify` (O_DIRECT re-read + sha256) OK, `cmp --sample 300` OK
+* `/media/deepak/E` went from 55 GiB free to **11 GiB free** after the store was preallocated
+
+Two things must be true before the server starts:
+
+1. Nothing else may hold this GPU or this RAM. `strata-host` currently uses ~10.6 GiB VRAM and ~27 GiB RAM; the
+   engine needs ~11 GiB of VRAM and ~24 GiB of RAM. Stop it first.
+2. `ulimit -l unlimited` — memlock is 4 GiB here, and the RAM tier is `cudaHostRegister`-ed.
+
+Then rebuild the extensions for this CPU (`scripts/build_extensions.sh`: the shipped `build/nv2` was compiled with
+`-mtune=znver3`, this is Zen2) and start `scripts/run_local.sh`.
+
 ## Host conditions that will bite you
 
 * **VRAM is contested.** The desktop session holds ~0.7 GiB; anything else serving a model on this GPU (a local

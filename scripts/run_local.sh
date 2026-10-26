@@ -34,6 +34,10 @@ if [ ! -f "$ROOT/hw.env" ]; then
 fi
 source "$ROOT/hw.env"
 
+# The RAM tier is cudaHostRegister-ed; without unlimited memlock the pinned arena can fail.
+if ! ulimit -l unlimited 2>/dev/null; then
+  echo "[lean] WARNING: cannot raise memlock (currently $(ulimit -l) KiB); run from a shell with ulimit -l unlimited." >&2
+fi
 USED=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1)
 if [ "${USED:-0}" -gt 1500 ]; then
   echo "[lean] WARNING: ${USED} MiB of VRAM is already in use (desktop session or another serving process)." >&2
