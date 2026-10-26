@@ -7,7 +7,7 @@ Checks the things the engine actually needs, measures the two numbers its lane p
   python3 scripts/hw_preflight.py --model /media/deepak/E/qwen/model --store-dir /media/deepak/E/qwen/store
   python3 scripts/hw_preflight.py ... --write hw.env --measure
 """
-import mmap, os, subprocess, sys, threading, time
+import json, mmap, os, subprocess, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -36,7 +36,7 @@ def odirect_probe(path):
         return False
 
 
-def read_throughput(path, gib=2.0, threads=8, piece_kb=256):
+def read_throughput(path, gib=2.0, threads=8, piece_kb=1024, record_bytes=None):
     """O_DIRECT sequential read throughput of a file, in GB/s, plus single-record latency."""
     import concurrent.futures as cf
     size = path.stat().st_size
@@ -70,7 +70,7 @@ def read_throughput(path, gib=2.0, threads=8, piece_kb=256):
     os.close(fd)
     gbps = bytes_read / dt / 1e9
     # one record on its own, queue depth 1: the latency the planner calls nvone
-    rec = 1_859_072
+    rec = record_bytes or 1_859_072
     fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
     buf = mmap.mmap(-1, (rec + BLOCK - 1) // BLOCK * BLOCK)
     lat = None
@@ -92,19 +92,71 @@ def pcie_bandwidth(mb=256):
     if not torch.cuda.is_available():
         print("SKIP PCIe bandwidth: no CUDA device")
         return None
-    n = mb * 1024 ** 2
-    src = torch.frombuffer(bytearray(n), dtype=torch.uint8)
-    src = src.pin_memory()
-    dst = torch.empty(n, dtype=torch.uint8, device="cuda")
-    torch.cuda.synchronize()
+    for try_mb in (mb, 32):
+        n = try_mb * 1024 ** 2
+        try:
+            src = torch.frombuffer(bytearray(n), dtype=torch.uint8).pin_memory()
+            dst = torch.empty(n, dtype=torch.uint8, device="cuda")
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            print(f"SKIP PCIe bandwidth ({try_mb} MiB): {str(e).splitlines()[0][:90]}")
+            torch.cuda.empty_cache()
+            continue
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        dst.copy_(src, non_blocking=True)
+        torch.cuda.synchronize()
+        gbps = n / (time.perf_counter() - t0) / 1e9
+        print(f"PCIe   {gbps:.2f} GB/s pinned host->device ({try_mb} MiB)")
+        del src, dst
+        torch.cuda.empty_cache()
+        return gbps
+    print("SKIP PCIe bandwidth: GPU too full to allocate a probe buffer")
+    return None
+
+
+def store_record_bytes(store, store_dir):
+    """record_bytes from the store manifest (<name>.json next to <name>.bin), if it exists."""
+    if not store:
+        return None
+    p = Path(store).with_suffix(".json")
+    if not p.exists():
+        return None
+    try:
+        return int(json.loads(p.read_text())["record_bytes"])
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+
+
+def cpu_bandwidth(workers=None, mb=512):
+    """Aggregate DRAM read rate at the CPU lane's thread count (numpy sums over slices; np.sum releases the GIL).
+    A proxy for the lane kernel's bandwidth, not its throughput -- override with --cpu-gbps= if you measured it."""
+    try:
+        import numpy as np
+        import concurrent.futures as cf
+    except ImportError:
+        print("SKIP CPU bandwidth: numpy not importable")
+        return None
+    cpus = hw_profile.cpu_layout()
+    n_threads = workers or max(1, cpus["ncores"] - 2)
+    try:
+        arr = np.random.default_rng(0).random(mb * 1024 ** 2 // 4, dtype=np.float32)
+    except (MemoryError, ValueError):
+        print("SKIP CPU bandwidth: probe buffer too large")
+        return None
+    step = len(arr) // n_threads
+    nbytes = len(arr) * 4
+    slices = [arr[i * step:(i + 1) * step] for i in range(n_threads)]
+    base = arr                      # slices are views; keep the base alive while timing
+    del arr
+    def s(a):
+        return float(np.sum(a))
+    np.sum(slices[0])               # warm up
     t0 = time.perf_counter()
-    dst.copy_(src, non_blocking=True)
-    torch.cuda.synchronize()
+    with cf.ThreadPoolExecutor(n_threads) as ex:
+        list(ex.map(s, slices))
     dt = time.perf_counter() - t0
-    gbps = n / dt / 1e9
-    print(f"PCIe   {gbps:.2f} GB/s pinned host->device ({mb} MiB)")
-    del src, dst
-    torch.cuda.empty_cache()
+    gbps = nbytes / dt / 1e9
+    print(f"CPU    {gbps:.1f} GB/s aggregate DRAM read at {n_threads} threads")
     return gbps
 
 
@@ -123,6 +175,7 @@ def main():
     chunk = opt("--chunk", 4096, int)
     desktop = opt("--desktop-gb", None, float)
     ram = opt("--ram-gb", None, float)
+    cpu_gbps = opt("--cpu-gbps", None, float)
 
     ok = True
     print(f"Model  {model}")
@@ -141,8 +194,9 @@ def main():
             fd = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
             os.posix_fallocate(fd, 0, 2 * GiB)
             os.close(fd)
-        nvme_gbps, lat = read_throughput(target)
+        nvme_gbps, lat = read_throughput(target, record_bytes=store_record_bytes(store, store_dir))
         pcie = pcie_bandwidth()
+        cpu_gbps = cpu_gbps or cpu_bandwidth()
         if target.name == ".probe.bin":
             target.unlink(missing_ok=True)
 
@@ -151,7 +205,11 @@ def main():
 
     measured = {'nvone': lat} if lat else None
     prof = hw_profile.derive(str(model), str(store) if store else None, context=context, chunk=chunk,
-                             ram_gb=ram, desktop_gb=desktop, nvme_gbps=nvme_gbps, pcie_gbps=pcie, measured=measured)
+                             ram_gb=ram, desktop_gb=desktop, nvme_gbps=nvme_gbps, pcie_gbps=pcie,
+                             cpu_gbps=cpu_gbps, measured=measured)
+    if measure and prof["gpu"]["vram_contested"] > 1 * GiB:
+        print("NOTE   another process holds the GPU and probably the disk; these NVMe/PCIe numbers are contended. "
+              "Re-run --measure after stopping it.")
     for w in prof["warnings"]:
         print(f"WARN   {w}")
     m = prof["model"]
@@ -160,7 +218,10 @@ def main():
     print(f"Disk   checkpoint {m['disk_bytes'] / GiB:.1f} GiB on disk ({m['checkpoint_bytes'] / GiB:.1f} GiB of tensors) "
           f"({free_model / GiB:.1f} GiB free at {model})")
     print(f"Disk   store {m['store_bytes'] / GiB:.1f} GiB ({free_store / GiB:.1f} GiB free at {store_dir})")
-    if m["store_bytes"] > free_store * 0.9:
+    existing = Path(store) if store else None
+    if existing and existing.exists() and existing.stat().st_size >= m["store_bytes"]:
+        print(f"PASS   store already on disk: {existing.name} ({existing.stat().st_size / GiB:.1f} GiB)")
+    elif m["store_bytes"] > free_store * 0.9:
         print(f"FAIL store needs {m['store_bytes'] / GiB:.1f} GiB, only {free_store / GiB:.1f} GiB free at {store_dir}")
         ok = False
     import resource

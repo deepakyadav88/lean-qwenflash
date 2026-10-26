@@ -76,11 +76,12 @@ def pci_link():
             if not cls.startswith("0x03"):
                 continue
             speed = (d / "current_link_speed").read_text().strip()
-            width = int(re.search(r"x(\d+)", (d / "current_link_width").read_text()).group(1))
+            width = int((d / "current_link_width").read_text().strip())
             gbps = float(re.search(r"([\d.]+) GT/s", speed).group(1))
             gen = 4 if gbps > 8 else 3 if gbps > 4 else 2
-            # encode: 16 GT/s per lane for Gen4, 8 for Gen3; usable DMA is ~80% of encode
-            return {"gen": gen, "width": width, "gbps": gbps * width * 0.8}
+            # GT/s is the raw transfer rate; payload is ~0.1 GB/s per GT/s per lane (8b/10b on Gen3, 128b/130b on Gen4):
+            # Gen3 x16 -> 12.8 GB/s, Gen4 x16 -> 25.6 GB/s (measured DMA is ~25 GB/s).
+            return {"gen": gen, "width": width, "gbps": gbps * width * 0.1}
     except Exception:
         pass
     return {"gen": 3, "width": 16, "gbps": REF["pcie_gbps"]}
@@ -118,7 +119,8 @@ def cpu_layout():
     elif vendor == "GenuineIntel":
         tune = "-mtune=haswell" if family >= 6 else "-mtune=generic"
     lane_ok = {"avx2", "fma", "f16c"} <= flags
-    # Dual-channel DDR4 on a 6-core Zen2 desktop streams ~35 GB/s for the CPU lane; scale with channel count
+    # Per-channel DR4 stream rate, conservative: the lane kernel is compute-bound as well as memory-bound.
+    # Override with --cpu-gbps= after measuring (e.g. a STREAM triad at the lane's thread count).
     chans = 2
     return {"affinity": affinity, "cores": cores, "ncores": len(cores), "flags": flags,
             "lane_ok": lane_ok, "tune": tune, "vendor": vendor, "family": family, "model": model,
@@ -226,7 +228,7 @@ def kv_bytes_per_token(model_dir, cache_quant=4):
 
 
 def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=False,
-           nvme_gbps=None, pcie_gbps=None, ram_gb=None, desktop_gb=None, measured=None):
+           nvme_gbps=None, pcie_gbps=None, ram_gb=None, desktop_gb=None, cpu_gbps=None, measured=None):
     nvml = Nvml()
     total_vram, used_vram, _ = nvml.memory()
     cap = nvml.capability()
@@ -262,7 +264,7 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
     slot_ratio = geo["slot_bytes"] / REF["slot_bytes"]
     pcie = pcie_gbps or link["gbps"]
     nvme = nvme_gbps or 2.5
-    cpu_bw = cpus["dram_gbps"]
+    cpu_bw = cpu_gbps or cpus["dram_gbps"]
     p = dict(REF["pol"])
     p["thit"] = round(REF["pol"]["thit"] * slot_ratio * REF["pcie_gbps"] / pcie, 3)
     p["tzc"] = round(REF["pol"]["tzc"] * slot_ratio * REF["pcie_gbps"] / pcie, 3)
@@ -273,7 +275,7 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
     p["nvone"] = round(p["nvdeep"] + REF["pol"]["nvlat"], 3)
     p["nvlat"] = round(max(0.10, REF["pol"]["nvlat"] * REF["nvme_latency_ms"] / 1.2), 3)
     if measured:
-        p.update({k: v for k, v in measured.items() if k in p})
+        p.update({k: round(float(v), 3) for k, v in measured.items() if k in p})
 
     # --- CPU pinning: physical cores for the lane, SMT siblings for the readers
     cores = [cpus["cores"][k] for k in sorted(cpus["cores"])]
@@ -365,7 +367,7 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
                  "margin_gb": margin / GiB, "host_reserve_gb": host_reserve / GiB},
         "cpu": {"ncores": cpus["ncores"], "logical": cpus["affinity"], "lane_ok": cpus["lane_ok"],
                 "tune": cpus["tune"], "dram_gbps": cpu_bw, "lane_cpus": lane_cpus, "reader_cpus": reader_cpus},
-        "model": {"checkpoint_bytes": geo["total_bytes"], "experts": geo["experts"], "layers": geo["layers"],
+        "model": {"checkpoint_bytes": geo["total_bytes"], "disk_bytes": geo["disk_bytes"], "experts": geo["experts"], "layers": geo["layers"],
                   "quant_bits": geo["quant_bits"], "head_bits": geo["head_bits"], "expert_bits": geo["expert_bits"],
                   "slot_bytes": geo["slot_bytes"], "record_bytes": geo["record_bytes"],
                   "store_bytes": geo["record_bytes"] * geo["experts"],
@@ -401,7 +403,8 @@ def main():
     chunk = opt("--chunk", 4096, int)
     ram = opt("--ram-gb", None, float)
     desktop = opt("--desktop-gb", None, float)
-    prof = derive(model, store, ctx, chunk, ram_gb=ram, desktop_gb=desktop)
+    cpu_gbps = opt("--cpu-gbps", None, float)
+    prof = derive(model, store, ctx, chunk, ram_gb=ram, desktop_gb=desktop, cpu_gbps=cpu_gbps)
     if "--json" in args:
         print(json.dumps(prof, indent=2))
         return

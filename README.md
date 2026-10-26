@@ -159,7 +159,7 @@ export QWEN38_NV_THREADS=12 QWEN38_NV_PIECE_KB=256 QWEN38_NV_PREFETCH=1 QWEN38_N
 export QWEN38_NV_VRING=16 QWEN38_NV_EXCL=1 QWEN38_NV_MAXCPU=8 QWEN38_NV_NOADMIT=1
 export QWEN38_NV_CPU=1 QWEN38_NV_CPU_THREADS=4 QWEN38_NV_CPU_CPUS=2-5 QWEN38_NV_READER_CPUS=6-11
 export QWEN38_MAIN_CPUS=0 QWEN38_NV_CTL_CPU=1 QWEN38_RCS_GB=0.25
-export QWEN38_NV_POL=0.17,0.004,0.074,0.145,0.183,0.044,0.078,0.12,0.745,0.865
+export QWEN38_NV_POL=0.17,0.009,0.145,0.145,0.183,0.044,0.153,0.12,0.745,0.865
 export QWEN38_LA=1 QWEN38_LA_BTTRIM=1 QWEN38_NV_PUBFAST=1 QWEN38_NV_PFSIDE=1 QWEN38_NV_CPU_KERN=1
 export TORCH_CUDA_ARCH_LIST=8.6 QWEN38_CPUTUNE=znver2 MAX_JOBS=4
 python qwen_server.py --model "$MODEL" --store "$STORE" \
@@ -234,7 +234,12 @@ Checkpoint totals include the n-gram embedding table, which is the part that gro
 Measured geometry for `2.05bpw_h4_ng4` on this machine (strata stopped, desktop 0.7 GiB, tier 20 GiB, 32k context):
 record 1,248,256 B, slot 1,228,800 B, VRAM budget 10.75 GiB, resident weights 4.09 GiB, KV 0.19 GiB, cache arena
 5.04 GiB = 4,403 slots, tier 17,476 slots, **21,879 of 25,088 experts resident (87%)**, lane off, POL
-`0.17,0.003,0.049,0.145,0.122,0.03,0.052,0.12,0.5,0.62`.
+`0.17,0.006,0.097,0.145,0.122,0.03,0.102,0.12,0.5,0.62`.
+
+The POL strings above are derived from PCIe 12.8 GB/s and an assumed 2.5 GB/s NVMe. `hw_preflight.py --measure`
+replaces them with measured values (it probes O_DIRECT read throughput, pinned host->device DMA, and aggregate DRAM
+read at the lane's thread count) — run it with the GPU and disk idle, since a busy `strata-host` drags the NVMe
+number down to ~0.2 GB/s.
 
 ```bash
 # 1. make room: /media/deepak/E has 11 GiB free; a 2.05 checkpoint + store needs ~94 GB

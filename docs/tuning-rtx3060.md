@@ -34,15 +34,19 @@ critical path. Prefill never uses the CPU lane and stays bit-exact; decode with 
 | KV cache | 0.19 GiB @ 32k, 4-bit | 6,144 B/token (12 full-attention layers, 2 KV heads, head_dim 256); 262k context would cost 1.6 GiB |
 | VRAM expert cache | 4.87 GiB = **2,835 slots** of 1.76 MiB | `QWEN38_EC_RESERVE_GB=1.2`, `QWEN38_EC_STAGE_GB=0.7`, `QWEN38_EC_ELASTIC_GB=3` |
 | host RAM tier | 20.0 GiB = **11,650 slots** | `QWEN38_NV_RAM_GB`, plus 0.25 GiB recurrent cache, 0.44 GiB prefill ring, 1.5 GiB margin, 3 GiB OS headroom |
-| resident experts | 14,485 of 25,088 (**58%**) | upstream held ~6,100 of 12,096 (50%) on a 24 GB card |
+| resident experts | 14,514 of 25,088 (**58%**) | upstream held ~6,100 of 12,096 (50%) on a 24 GB card |
+| PCIe | **gen3 x16 = 12.55 GB/s** measured pinned host->device | upstream: gen4 x16, ~25 GB/s |
+| CPU lane DRAM | **26.7 GB/s** aggregate read at 4 threads | upstream: 136 GB/s at 22 threads |
+| NVMe | ~0.2 GB/s while `strata-host` is running; re-measure when idle | upstream: 4-drive RAID0, ~26 GB/s |
 | CPU lane | 4 threads on cores 2-5, readers on the SMT siblings 6-11, controller on cpu1, main on cpu0 | upstream: 22 lane threads, 14 readers |
 | ISA tune | `-mtune=znver2` (family 23 = Zen2) | the shipped build used `-mtune=znver3` |
 | CUDA arch | `TORCH_CUDA_ARCH_LIST=8.6` | the shipped default was `8.9`, which is wrong for this card |
 | store | 43.5 GiB on the NVMe at `/media/deepak/E/qwen/store` | `O_DIRECT` verified on ext4 |
 
 Lane cost model (`QWEN38_NV_POL`) rescaled by slot size, PCIe width, NVMe throughput and DRAM bandwidth:
-`0.17,0.004,0.074,0.145,0.183,0.044,0.078,0.12,0.745,0.865` (ms) — a 1.76 MiB slot is 5x cheaper to move than the
+`0.17,0.009,0.145,0.145,0.183,0.044,0.153,0.12,0.745,0.865` (ms) — a 1.76 MiB slot is 5x cheaper to move than the
 9.44 MiB slot the server tuned against, but a single NVMe drive is ~10x slower than the measured RAID0.
+`hw_preflight.py --measure` overwrites these with the probed numbers.
 
 ## Levers, in order of how much they matter here
 
