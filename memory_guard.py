@@ -27,9 +27,10 @@ def _own_cgroup():
     """The cgroup v2 path this process lives in (set by systemd-run --scope / docker)."""
     try:
         for line in open('/proc/self/cgroup'):
-            ctrl, path = line.split(':', 1)
-            if ctrl == '0':
-                return Path('/sys/fs/cgroup') / path.strip().lstrip('/')
+            # v2 unified line: '0::/path' - split(':', 1) would leave the second colon in the path
+            parts = line.split(':', 2)
+            if parts[0] == '0':
+                return Path('/sys/fs/cgroup') / parts[-1].strip().lstrip('/')
     except OSError:
         pass
     return None
