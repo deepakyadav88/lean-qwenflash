@@ -63,6 +63,10 @@ Lane cost model (`QWEN38_NV_POL`) rescaled by slot size, PCIe width, NVMe throug
 8. **`QWEN38_CPUTUNE` / `TORCH_CUDA_ARCH_LIST`** — build for sm_86 and znver2, not sm_89/znver3.
 9. **Storage placement** — the store must be on the NVMe (`/media/deepak/E`), not the HDDs; `O_DIRECT` on ext4 is
    probed by `scripts/hw_preflight.py`.
+10. **Decode scheduling levers** the profile turns on: `QWEN38_LA=1` (launch the next decode step before the host
+    reads the sampled token — bit-exact), `QWEN38_LA_BTTRIM=1`, `QWEN38_NV_PUBFAST=1`, `QWEN38_NV_PFSIDE=1`
+    (prefetch guess on a side stream), `QWEN38_NV_CPU_KERN=1` (the N135 CPU-lane forward, ~+6% at C1, not
+    bit-exact). Any of them can be set to 0 in `hw.env`.
 
 ## Honest expectations
 

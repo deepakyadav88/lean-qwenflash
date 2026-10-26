@@ -294,6 +294,13 @@ def derive(model_dir, store=None, context=32768, chunk=4096, cache_quant=4, mtp=
         "QWEN38_NV_EXCL": "1",
         "QWEN38_NV_CPU": "1" if cpus["lane_ok"] else "0",
         "QWEN38_NV_NOADMIT": "1",
+        # HOM-272 / N136 decode levers, measured on the same code path (the CPU kernel needs the CPU lane).
+        # Each is a scheduling change; CPU_KERN is not bit-exact (~3e-4 relative per expert).
+        "QWEN38_LA": "1" if cpus["lane_ok"] else "0",
+        "QWEN38_LA_BTTRIM": "1" if cpus["lane_ok"] else "0",
+        "QWEN38_NV_PUBFAST": "1",
+        "QWEN38_NV_PFSIDE": "1",
+        "QWEN38_NV_CPU_KERN": "1" if cpus["lane_ok"] else "0",
         "QWEN38_NV_POL": ",".join(str(p[k]) for k in
                                   ["g0", "thit", "tzc", "ca", "cb", "ctok", "push", "nvlat", "nvdeep", "nvone"]),
         "QWEN38_EC_RESERVE_GB": f"{reserve / GiB:.1f}",
