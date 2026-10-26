@@ -17,7 +17,7 @@ def install():
     from torch.utils.cpp_extension import load
     d = os.environ.get("QWEN38_K110_BUILD", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "k110f"))
     os.makedirs(d, exist_ok=True)
-    fast = load(name="ft_split_fast", sources=[_SRC], build_directory=d, extra_cuda_cflags=["-O3"], verbose=False)
+    fast = load(name="ft_split_fast", sources=[_SRC], build_directory=d, extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)
     stock = cpu_tier._CU
 
     def ft_split(sel, *a):

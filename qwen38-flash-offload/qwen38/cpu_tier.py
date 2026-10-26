@@ -41,7 +41,7 @@ def _build():
     _H = load(name="ft_tier_host", sources=[os.path.join(_KDIR, "ft_tier_ext.cpp")], build_directory=d,
               extra_cflags=["-O3", *isa, "-std=c++17", "-I" + _KDIR], extra_ldflags=["-lpthread"], verbose=False)
     _CU = load(name="ft_tier_cu", sources=[os.path.join(_KDIR, "ft_tier_cu.cu")], build_directory=d,
-               extra_cuda_cflags=["-O3"], verbose=False)
+               extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)   # c++20: nvcc fails on torch 2.11 headers at c++17
 
 
 def auto_cpus(skip=2):

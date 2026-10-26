@@ -292,7 +292,8 @@ def _ext():
         src = os.path.join(d, "ec.cu")
         if not os.path.exists(src) or open(src).read() != _SRC:
             open(src, "w").write(_SRC)
-        _EXT = load(name="qwen38_ec", sources=[src], build_directory=d, extra_cuda_cflags=["-O3"], verbose=False)
+        # -std=c++20: nvcc cannot parse torch 2.11 headers at its c++17 default (List_inl.h typename/decltype).
+        _EXT = load(name="qwen38_ec", sources=[src], build_directory=d, extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)
     return _EXT
 
 

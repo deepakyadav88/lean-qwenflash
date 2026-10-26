@@ -9,5 +9,5 @@ MODEL=${MODEL:-/media/deepak/E/qwen/model}
 "$PY" "$ROOT/hw_profile.py" --model="$MODEL" --write "$ROOT/hw.env"
 source "$ROOT/hw.env"
 echo "[lean] building extensions: arch=$TORCH_CUDA_ARCH_LIST cpu-tune=$QWEN38_CPUTUNE"
-MAX_JOBS=${MAX_JOBS:-4} bash "$ROOT/qwen38-flash-offload/scripts/install.sh" "$ROOT/qwen38-flash-offload"
+MAX_JOBS=${MAX_JOBS:-4} PY="$PY" bash "$ROOT/qwen38-flash-offload/scripts/install.sh" "$ROOT/qwen38-flash-offload"
 echo "[lean] extensions built under qwen38-flash-offload/build/"

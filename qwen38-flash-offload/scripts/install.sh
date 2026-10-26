@@ -9,7 +9,8 @@ set -euo pipefail
 ROOT=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 mkdir -p "$ROOT/triton_cache"
 cd "$ROOT"
-MAX_JOBS=${MAX_JOBS:-4} python3 - <<'PY'
+PY=${PY:-python3}
+MAX_JOBS=${MAX_JOBS:-4} "$PY" - <<'PY'
 import sys, os
 sys.path.insert(0, os.path.join(os.getcwd(), "qwen38"))
 from torch.utils.cpp_extension import load
@@ -19,7 +20,7 @@ cpu_tier._build()
 k_hcfuse.ext()
 d = os.environ.get("QWEN38_K110_BUILD", os.path.join(os.getcwd(), "build", "k110f"))
 os.makedirs(d, exist_ok=True)
-fast = load(name="ft_split_fast", sources=[k_ftsplit._SRC], build_directory=d, extra_cuda_cflags=["-O3"], verbose=False)
+fast = load(name="ft_split_fast", sources=[k_ftsplit._SRC], build_directory=d, extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)
 nv1, nv2x = nv_tier._ext(), nv2.ext()
 print("extensions built:", expert_cache._EXT.__file__, cpu_tier._H.__file__, cpu_tier._CU.__file__, k_hcfuse._EXT.__file__,
       fast.__file__, nv1.__file__, nv2x.__file__)

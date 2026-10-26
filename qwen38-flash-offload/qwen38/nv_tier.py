@@ -246,7 +246,7 @@ def _ext():
         src = os.path.join(d, "nv.cu")
         if not os.path.exists(src) or open(src).read() != _SRC:
             open(src, "w").write(_SRC)
-        _EXT = load(name="qwen38_nv", sources=[src], build_directory=d, extra_cuda_cflags=["-O3"], verbose=False)
+        _EXT = load(name="qwen38_nv", sources=[src], build_directory=d, extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)
     return _EXT
 
 

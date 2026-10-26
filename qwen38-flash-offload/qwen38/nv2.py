@@ -59,7 +59,7 @@ def ext():
         _EXT = load(name="qwen38_nv2", sources=[os.path.join(here, "nv2_host.cpp"), os.path.join(here, "nv2_dev.cu")],
                     build_directory=d, extra_cflags=["-O3", "-mavx2", "-mfma", "-mf16c", tune, "-std=c++17",
                                                      "-I" + here],
-                    extra_cuda_cflags=["-O3", "-I" + here], extra_ldflags=["-lpthread"], verbose=False)
+                    extra_cuda_cflags=["-O3", "-I" + here, "-std=c++20"], extra_ldflags=["-lpthread"], verbose=False)
     return _EXT
 
 

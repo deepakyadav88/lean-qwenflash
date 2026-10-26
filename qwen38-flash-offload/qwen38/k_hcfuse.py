@@ -362,7 +362,7 @@ def ext():
         if not os.path.exists(src) or open(src).read() != _SRC:
             open(src, "w").write(_SRC)
         _EXT = load(name="qwen38_k101", sources=[src], build_directory=d,
-                    extra_cuda_cflags=["-lineinfo", "-O3", "--use_fast_math"], verbose=False)
+                    extra_cuda_cflags=["-lineinfo", "-O3", "--use_fast_math", "-std=c++20"], verbose=False)
     return _EXT
 
 
