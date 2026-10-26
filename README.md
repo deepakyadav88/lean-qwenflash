@@ -124,6 +124,13 @@ python infer.py \
   --prompt "Write an implementation of merge sort in C."
 ```
 
+### Benchmarking
+`--cache`, `--cache-quant`, `--chunk` and the `QWEN38_*` env values are the knobs. Sweep context lengths with
+`scripts/bench_local.sh` (restarts the server per KV size and runs `bench/sweep.py`), and read `/stats`, `/memory`,
+`/nv_trace`, `/server_info` and `GET /la?on=0|1` while it runs. The full lever table and the measurement rules are in
+[docs/benchmarking.md](docs/benchmarking.md); the per-machine budgets are derived in
+[docs/tuning-rtx3060.md](docs/tuning-rtx3060.md).
+
 ---
 
 ## To Do
