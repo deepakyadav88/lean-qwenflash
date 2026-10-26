@@ -67,16 +67,26 @@ python compile_local.py
 
 ### 3. Download & Build Store
 
-Download the 3.05bpw checkpoint and N-gram table (~85 GB total):
+Download the 3.05bpw checkpoint and N-gram table (~85 GB total). It writes `$QWEN_WORK_ROOT/model` and is
+resumable (byte-range parts + per-file chunk state):
 ```bash
-python download_http.py --model-dir ./model
+QWEN_WORK_ROOT=./ python download_http.py
 ```
 
-Pack the routed experts into a direct-I/O binary store (~47 GB):
+Pack the routed experts into a direct-I/O binary store (~43.5 GiB):
 ```bash
-python qwen38-flash-offload/scripts/pack_qwen38_store.py \
-  --model ./model \
-  --out ./store/qwen.bin
+python qwen38-flash-offload/scripts/pack_qwen38_store.py pack \
+  --model ./model --out-dir ./store
+```
+
+On a consumer PC (12 GB VRAM, 32 GB RAM, one NVMe) the sizes above are derived from the machine instead of
+copied from the measured server. `scripts/download_model.sh <ssd-dir>` downloads and packs, and
+`docs/tuning-rtx3060.md` explains every lever:
+
+```bash
+scripts/download_model.sh /media/deepak/E/qwen
+scripts/build_extensions.sh
+scripts/run_local.sh
 ```
 
 ---

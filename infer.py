@@ -7,19 +7,21 @@ def main():
     ap.add_argument('--model',required=True); ap.add_argument('--store',required=True)
     ap.add_argument('--prompt'); ap.add_argument('--raw',action='store_true')
     ap.add_argument('--no-thinking',action='store_true')
-    ap.add_argument('--chunk',type=int,default=8192); ap.add_argument('--cache',type=int,default=16384)
+    ap.add_argument('--chunk',type=int,default=4096); ap.add_argument('--cache',type=int,default=16384)
     ap.add_argument('--single-pass-prefill',action='store_true')
-    ap.add_argument('--ram-gb',type=float,default=9); ap.add_argument('--cpu',action='store_true')
+    ap.add_argument('--ram-gb',type=float,default=None); ap.add_argument('--cpu',action='store_true')
     ap.add_argument('--mtp',type=int,default=0); ap.add_argument('--cache-quant',default=None)
     ap.add_argument('--metrics',help='Persist request metrics to this JSON file')
     a=ap.parse_args()
     from memory_guard import HostMemory,DeviceMemory
-    host=HostMemory(os.environ.get('QWEN_GLOBAL_MEMORY_CGROUP',os.environ.get('QWEN_MEMORY_CGROUP','/sys/fs/cgroup')))
+    host=HostMemory(os.environ.get('QWEN_GLOBAL_MEMORY_CGROUP') or os.environ.get('QWEN_MEMORY_CGROUP'))
     gpu=DeviceMemory()
     if a.single_pass_prefill: os.environ['QWEN_EXL3_SOURCE']='1'
-    from qwen_offload import load
+    from qwen_offload import load, profile_for
+    profile=profile_for(a.model,a.store,a.ram_gb,a.cache,a.chunk,int(a.cache_quant or 0),bool(a.mtp))
+    for w in (profile['warnings'] if profile else []): print('HW_WARN',w,file=sys.stderr,flush=True)
     model,config,cache,tok,pools,tables,draft,draft_cache=load(
-        a.model,a.store,a.chunk,a.cache,a.ram_gb,a.cpu,a.mtp,True,a.cache_quant)
+        a.model,a.store,a.chunk,a.cache,a.ram_gb,a.cpu,a.mtp,True,a.cache_quant,profile=profile)
     from exllamav3 import Generator,Job,GreedySampler
     prompt=a.prompt if a.prompt is not None else sys.stdin.read()
     rendered=prompt if a.raw else model.default_chat_prompt(prompt)

@@ -5,7 +5,7 @@ from pathlib import Path
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--model',required=True); ap.add_argument('--store',required=True)
-    ap.add_argument('--chunk',type=int,default=2048); ap.add_argument('--ram-gb',type=float,default=6)
+    ap.add_argument('--chunk',type=int,default=2048); ap.add_argument('--ram-gb',type=float,default=None)
     ap.add_argument('--cache',type=int,default=16384); ap.add_argument('--out',required=True)
     ap.add_argument('--prefill',type=int,nargs='*',default=[1024,8192])
     ap.add_argument('--reps',type=int,default=2); ap.add_argument('--cpu',action='store_true')
@@ -30,8 +30,7 @@ def main():
     if a.single_pass_prefill: os.environ['QWEN_EXL3_SOURCE']='1'
     from memory_guard import DeviceMemory,HostMemory
     gpu_memory=DeviceMemory()
-    host_memory=HostMemory(os.environ.get('QWEN_GLOBAL_MEMORY_CGROUP',
-                                         os.environ.get('QWEN_MEMORY_CGROUP','/sys/fs/cgroup')))
+    host_memory=HostMemory(os.environ.get('QWEN_GLOBAL_MEMORY_CGROUP') or os.environ.get('QWEN_MEMORY_CGROUP'))
     from qwen_offload import load
     model,config,cache,tok,pools,tables,draft_model,draft_cache=load(
         a.model,a.store,a.chunk,a.cache,a.ram_gb,a.cpu,max([a.mtp]+a.mtp_grid),a.embed_disk,a.cache_quant)

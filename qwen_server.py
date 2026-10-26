@@ -36,24 +36,33 @@ def qwen_sampling_defaults(body):
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--model',default=str(ROOT/'model'));ap.add_argument('--store',default=str(ROOT/'store/qwen.bin'))
-    ap.add_argument('--ram-gb',type=float,required=True);ap.add_argument('--cache',type=int,default=262144)
-    ap.add_argument('--chunk',type=int,default=24576);ap.add_argument('--host',default='127.0.0.1')
+    ap.add_argument('--ram-gb',type=float,default=None,help='pinned host expert tier; default: derived from MemAvailable')
+    ap.add_argument('--cache',type=int,default=32768)
+    ap.add_argument('--chunk',type=int,default=4096);ap.add_argument('--host',default='127.0.0.1')
     ap.add_argument('--port',type=int,default=30000);ap.add_argument('--served-name',default='qwen3.8-flash-next')
+    ap.add_argument('--cpu-lane',action='store_true',help='force the AVX2 CPU lane on/off explicitly (default: profile decides)')
     cli=ap.parse_args()
     os.environ['QWEN_EXL3_SOURCE']='1'
     from memory_guard import DeviceMemory,HostMemory
-    gpu=DeviceMemory();host=HostMemory(os.environ['QWEN_GLOBAL_MEMORY_CGROUP'])
-    from qwen_offload import load
+    from qwen_offload import load, profile_for
+    profile=profile_for(cli.model,cli.store,cli.ram_gb,cli.cache,cli.chunk,4)
+    if profile:
+        for w in profile['warnings']: print('HW_WARN',w,flush=True)
+        print('HW_PROFILE',json.dumps({'vram_limit':profile['gpu']['vram_limit'],'vram_slots':profile['model']['vram_slots'],
+                                      'ram_tier_gib':profile['host']['tier_gb'],'lane':profile['cpu']['lane_ok'],
+                                      'lane_cpus':profile['cpu']['lane_cpus'],'pol':profile['pol']}),flush=True)
+    gpu=DeviceMemory();host=HostMemory(os.environ.get('QWEN_GLOBAL_MEMORY_CGROUP'))
     start=time.monotonic()
     model,config,cache,tok,pools,tables,draft_model,draft_cache=load(
-        cli.model,cli.store,cli.chunk,cli.cache,cli.ram_gb,cpu=False,mtp=0,embed_disk=True,cache_quant=4)
+        cli.model,cli.store,cli.chunk,cli.cache,cli.ram_gb,cli.cpu_lane or False,mtp=0,embed_disk=True,cache_quant=4,
+        profile=profile)
     # Reuse the existing HTTP, SSE, disconnect cancellation, sampling and stats implementation.
     spec=importlib.util.spec_from_file_location('qwen_http_backend',ROOT/'qwen38-flash-offload/qwen38/serve.py')
     backend=importlib.util.module_from_spec(spec);spec.loader.exec_module(backend)
     backend.args=SimpleNamespace(model_dir=cli.model,cache_size=cli.cache,chunk_size=cli.chunk,cache_quant='4',
         host=cli.host,port=cli.port,served_name=cli.served_name,max_batch_size=1,max_q_size=8,
         num_draft_tokens=0,dynamic_draft=False,draft_confidence=0.0,ngram_match_min=0,recurrent_cache_size=0.25,
-        expert_ram_gib=cli.ram_gb,single_pass_prefill=False)
+        expert_ram_gib=float(os.environ['QWEN38_NV_RAM_GB']),single_pass_prefill=False)
     backend.model=model;backend.config=config;backend.cache=cache;backend.tok=tok
     backend.draft_model=draft_model;backend.draft_cache=draft_cache;backend.CTX=cli.cache
     backend.t_load=time.monotonic()-start;backend.hf_tok=None

@@ -11,6 +11,10 @@
 !/memory_guard.py
 !/download_http.py
 !/append_mtp.py
+!/hw_profile.py
+!/scripts/
+!/docs/
+/hw.env
 !/test_*.py
 /test_qwen_thinking.py
 !/tests/
