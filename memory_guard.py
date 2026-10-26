@@ -91,21 +91,24 @@ class DeviceMemory:
         total = self.Info()
         assert self.lib.nvmlDeviceGetMemoryInfo(self.handle, C.byref(total)) == 0
         self.guard = os.environ.get('QWEN_VRAM_GUARD', 'on') != 'off'
-        # A desktop session already holds VRAM; the guard budget is the whole card, not what is free now.
-        self.limit = min(self.limit, total.total)
+        # NVML counts the whole card, so what other processes already hold at start (desktop session,
+        # a local LLM started before us) is the baseline: the budget applies to THIS engine's growth.
+        self.base = total.used
+        self.limit = min(self.limit, total.total - self.base)
         self.peak = 0; self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True); self.thread.start()
 
     def sample(self):
         info = self.Info()
         assert self.lib.nvmlDeviceGetMemoryInfo(self.handle, C.byref(info)) == 0
-        self.peak = max(self.peak, info.used)
-        return info.used
+        used = info.used - self.base
+        self.peak = max(self.peak, used)
+        return used
 
     def _run(self):
         while self.running:
             if self.guard and self.sample() > self.limit:
-                print(f'VRAM LIMIT EXCEEDED: {self.peak} > {self.limit}', flush=True)
+                print(f'VRAM LIMIT EXCEEDED: card grew {self.peak} over its {self.base} at start > budget {self.limit}', flush=True)
                 import sys
                 torch = sys.modules.get('torch')
                 if torch is not None and torch.cuda.is_initialized():

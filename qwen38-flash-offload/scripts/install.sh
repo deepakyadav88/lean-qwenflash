@@ -22,6 +22,18 @@ d = os.environ.get("QWEN38_K110_BUILD", os.path.join(os.getcwd(), "build", "k110
 os.makedirs(d, exist_ok=True)
 fast = load(name="ft_split_fast", sources=[k_ftsplit._SRC], build_directory=d, extra_cuda_cflags=["-O3", "-std=c++20"], verbose=False)
 nv1, nv2x = nv_tier._ext(), nv2.ext()
+if os.environ.get("TORCH_CUDA_ARCH_LIST"):
+    # torch's cpp_extension builds under a FileBaton 'lock'; if a build died mid-compile the lock is
+    # orphaned and every later import waits on it forever with no progress. Clear it if nobody is building.
+    import subprocess, torch
+    ext_dir = os.path.join(os.path.expanduser("~/.cache/torch_extensions"),
+                           f"py{sys.version_info.major}{sys.version_info.minor}_cu{torch.version.cuda.replace('.', '')}",
+                           "exllamav3_ext")
+    baton = os.path.join(ext_dir, "lock")
+    if os.path.exists(baton) and subprocess.run(["pgrep", "-x", "ninja"], capture_output=True).returncode != 0:
+        os.remove(baton)
+    import exllamav3.ext   # JIT-build exllamav3 itself now (cached under ~/.cache/torch_extensions):
+                           # on first start it otherwise compiles for 10-30 min, looking like a hang
 print("extensions built:", expert_cache._EXT.__file__, cpu_tier._H.__file__, cpu_tier._CU.__file__, k_hcfuse._EXT.__file__,
       fast.__file__, nv1.__file__, nv2x.__file__)
 PY

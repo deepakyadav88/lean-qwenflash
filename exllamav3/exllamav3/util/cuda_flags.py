@@ -242,6 +242,8 @@ def cuda_cflags(cuda_home: str | None = None, debug: bool = False, hip: bool = F
         "-O3", "--use_fast_math",
         "-Xcudafe", "--diag_suppress=177",
         "-Xcudafe", "--diag_suppress=20012",
+        "-std=c++20",   # nvcc cannot parse torch 2.11 headers (ATen/core/List_inl.h) at its c++17 default;
+                        # torch's cpp_extension keeps this last on the nvcc line, so it wins over -std=c++17
     ]
     compress = os.environ.get("EXLLAMA_EXT_COMPRESS", "1")
     if compress != "0":
